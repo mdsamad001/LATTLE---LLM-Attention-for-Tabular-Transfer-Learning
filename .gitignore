@@ -1,0 +1,47 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Environment & virtualenv
+.env/
+.venv/
+env/
+venv/
+llm/  # Your conda environment name, if local
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode & other IDE settings
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Results, models, caches
+llm_finetuning_results/
+cached_results/
+best_models/
+*.db
+*.pt
+
+# WandB
+wandb/
+wandb-debug.log
+wandb/latest-run/
+
+# Datasets
+*.csv
+*.tsv
+*.xlsx
+*.h5
+*.pkl
+*.npy
+
+# System
+.DS_Store
+Thumbs.db

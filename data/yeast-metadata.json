@@ -1,0 +1,10 @@
+{
+    "mcg": "McGeoch's method for signal sequence recognition.",
+    "gvh": "von Heijne's method for signal sequence recognition.",
+    "alm": "Score of the ALOM membrane spanning region prediction program.",
+    "mit": "Score of discriminant analysis of the amino acid content of the N-terminal region (20 residues long) of mitochondrial and non-mitochondrial proteins.",
+    "erl": "Presence of HDEL substring (thought to act as a signal for retention in the endoplasmic reticulum lumen). Binary attribute.",
+    "pox": "Peroxisomal targeting signal in the C-terminus.",
+    "vac": "Score of discriminant analysis of the amino acid content of vacuolar and extracellular proteins.",
+    "nuc": "Score of discriminant analysis of nuclear localization signals of nuclear and non-nuclear proteins."
+}

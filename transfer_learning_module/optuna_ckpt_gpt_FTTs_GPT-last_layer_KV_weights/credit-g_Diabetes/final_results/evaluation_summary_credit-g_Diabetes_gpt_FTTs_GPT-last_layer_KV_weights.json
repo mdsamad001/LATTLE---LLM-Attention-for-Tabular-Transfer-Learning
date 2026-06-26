@@ -1,0 +1,26 @@
+{
+  "best_hyperparameters_per_fold": {
+    "fold_0": {
+      "lr": 8.885022480588515e-05,
+      "batch_size": 96,
+      "weight_decay": 7.462033323780677e-06,
+      "hidden_dropout_prob": 0.3,
+      "warmup_ratio": 0.05
+    }
+  },
+  "fold_auc_scores": {
+    "fold_0": {
+      "auc": 0.748,
+      "acc": 0.669,
+      "f1": 0.215
+    }
+  },
+  "summary_stats": {
+    "auc_mean": 0.748,
+    "auc_std": 0.0,
+    "acc_mean": 0.669,
+    "acc_std": 0.0,
+    "f1_mean": 0.215,
+    "f1_std": 0.0
+  }
+}
