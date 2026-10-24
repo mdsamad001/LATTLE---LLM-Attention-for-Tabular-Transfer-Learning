@@ -1,47 +1,27 @@
-# Byte-compiled / cache files
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
-
-# Environment & virtualenv
-.env/
+# environment
 .venv/
-env/
-venv/
-llm/  # Your conda environment name, if local
+__pycache__/
+*.pyc
 
-# Jupyter notebook checkpoints
+# large artifacts / regenerable outputs
+llm_finetuning_results/
+archive_evalloss/
+cached_datasets/
+transfer_learning_results/
+transfer_learning_module/gpt_FTTs_GPT-last_layer_KV_weights/
+lattle_tokenizer/
+step1_logs/
+*.log
+lattle.zip
+
+# datasets are downloaded from OpenML by the fetch script
+data/*.csv
+
+# macOS cruft from the original archive
+._*
+.DS_Store
+**/.DS_Store
 .ipynb_checkpoints/
 
-# VSCode & other IDE settings
-.vscode/
-.idea/
-
-# Logs
-*.log
-
-# Results, models, caches
-llm_finetuning_results/
-cached_results/
-best_models/
-*.db
-*.pt
-
-# WandB
-wandb/
-wandb-debug.log
-wandb/latest-run/
-
-# Datasets
-*.csv
-*.tsv
-*.xlsx
-*.h5
-*.pkl
-*.npy
-
-# System
-.DS_Store
-Thumbs.db
+# paper draft
+*.pdf

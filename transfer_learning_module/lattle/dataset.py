@@ -724,11 +724,11 @@ def load_single_data(dataname, dataset_config=None, encode_cat=False, data_cut=N
     # process num
     X.replace('?', np.nan, inplace=True)
     if len(num_cols) > 0:
-        for col in num_cols: X[col].fillna(X[col].mode()[0])#, inplace=True)
+        for col in num_cols: X[col] = X[col].fillna(X[col].mode()[0])
         #X[num_cols] = MinMaxScaler().fit_transform(X[num_cols])
 
     if len(cat_cols) > 0:
-        for col in cat_cols: X[col].fillna(X[col].mode()[0])#, inplace=True)
+        for col in cat_cols: X[col] = X[col].fillna(X[col].mode()[0])
         # process cate
         if encode_cat:
             X[cat_cols] = OrdinalEncoder().fit_transform(X[cat_cols])
@@ -736,7 +736,7 @@ def load_single_data(dataname, dataset_config=None, encode_cat=False, data_cut=N
             X[cat_cols] = X[cat_cols].astype(str)
 
     if len(bin_cols) > 0:
-        for col in bin_cols: X[col].fillna(X[col].mode()[0])#, inplace=True)
+        for col in bin_cols: X[col] = X[col].fillna(X[col].mode()[0])
         if 'binary_indicator' in dataset_config:
             X[bin_cols] = X[bin_cols].astype(str).applymap(lambda x: 1 if x.lower() in dataset_config['binary_indicator'] else 0).values
         else:

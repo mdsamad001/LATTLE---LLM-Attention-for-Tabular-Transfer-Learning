@@ -12,12 +12,13 @@ class DistilGPT2WithFTTHead(nn.Module):
         # Projection for CLS token
         self.proj = nn.Identity() if hidden_dim == ftt_dim else nn.Linear(hidden_dim, ftt_dim)
 
-        # Extract Q/K/V weights from final GPT2 attention layer
+        # Extract Q/K/V weights from final GPT2 attention layer.
+        # Registered as buffers so they live in the state dict and follow .to(device).
         gpt_attn_w = self.base.h[-1].attn.c_attn.weight.data  # shape: [hidden_dim, 3 * hidden_dim]
         d = hidden_dim
-        self.q_vec = gpt_attn_w[:, :d].mean(dim=0)  # shape: [hidden_dim]
-        self.k_vec = gpt_attn_w[:, d:2*d].mean(dim=0)
-        self.v_vec = gpt_attn_w[:, 2*d:].mean(dim=0)
+        self.register_buffer('q_vec', gpt_attn_w[:, :d].mean(dim=0).clone())  # shape: [hidden_dim]
+        self.register_buffer('k_vec', gpt_attn_w[:, d:2*d].mean(dim=0).clone())
+        self.register_buffer('v_vec', gpt_attn_w[:, 2*d:].mean(dim=0).clone())
 
         # Projection layers for q, k, v
         self.q_proj = nn.Linear(hidden_dim, ftt_dim, bias=False) if hidden_dim != ftt_dim else nn.Identity()
@@ -42,16 +43,19 @@ class DistilGPT2WithFTTHead(nn.Module):
     def forward(self, input_ids, attention_mask, labels=None):
         # Base GPT forward
         outputs = self.base(input_ids=input_ids, attention_mask=attention_mask)
-        cls_embedding = outputs.last_hidden_state[:, 0, :]  # (batch, hidden_dim)
+        # GPT-2 is causal: position 0 attends only to itself, so use the LAST
+        # non-padded token as the sequence representation (as in
+        # GPT2ForSequenceClassification), not position 0.
+        last_idx = attention_mask.sum(dim=1) - 1  # (batch,)
+        batch_idx = torch.arange(input_ids.size(0), device=input_ids.device)
+        cls_embedding = outputs.last_hidden_state[batch_idx, last_idx]  # (batch, hidden_dim)
 
         # Project CLS embedding
         cls_proj = self.proj(cls_embedding).unsqueeze(1)  # (batch, 1, ftt_dim)
 
-        # Move q, k, v to correct device
-        device = cls_proj.device
-        q_vec = self.q_vec.to(device)
-        k_vec = self.k_vec.to(device)
-        v_vec = self.v_vec.to(device)
+        q_vec = self.q_vec
+        k_vec = self.k_vec
+        v_vec = self.v_vec
 
         # Expand to match batch size
         q = self.q_proj(q_vec).unsqueeze(0).expand_as(cls_proj)

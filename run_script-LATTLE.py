@@ -16,20 +16,38 @@ import pandas as pd
 from transfer_learning_module import lattle
 from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
 
+import argparse
+
+_ap = argparse.ArgumentParser()
+_ap.add_argument('--pair-index', type=int, default=None,
+                 help='run only this index of dataset_pairs (for parallel workers)')
+_ap.add_argument('--folds', type=int, default=3)
+_ap.add_argument('--fold-list', type=str, default=None,
+                 help='comma-separated folds to run (overrides --folds); lets '
+                      'workers split folds of one pair across GPUs')
+_ap.add_argument('--trials', type=int, default=15)
+_ap.add_argument('--tag', type=str, default='',
+                 help='suffix for output dirs so parallel workers do not collide')
+_args = _ap.parse_args()
+
+WORK = f'./transfer_learning_results{_args.tag}'
+
 
 
 # === Configuration ===
+# Source names match the Step-1/Step-2 dataset names so KV weights resolve
+# under KV_DIR/{source}_{fold}.
 dataset_pairs = [
     ("credit-g", "Diabetes"),
-    # ("Cardivascular-Disease", "Diabetes"),
-    # ("optdigits", "vehicle"),
-    # ("mfeat-fourier", "vehicle"),
-    # ("sick", "cmc"),
-    # ("churn", "cmc"),
-    # ("car-evaluation", "pc1"),
-    # ("steel-plates-fault", "pc1"),
-    # ("steel-plates-fault", "cylinder-bands"),
-    # ("seismic-bumps", "cylinder-bands")
+    ("Cardiovascular-Disease-dataset", "Diabetes"),
+    ("optdigits", "vehicle"),
+    ("mfeat-fourier", "vehicle"),
+    ("sick", "cmc"),
+    ("churn", "cmc"),
+    ("car", "pc1"),
+    ("steel-plate-fault", "pc1"),
+    ("steel-plate-fault", "cylinder-bands"),
+    ("seismic_bumps", "cylinder-bands"),
 ]
 
 num_class_target_map = {
@@ -40,9 +58,20 @@ num_class_target_map = {
     "cylinder-bands": 2
 }
 
-folds = list(range(1))
+folds = ([int(x) for x in _args.fold_list.split(',')]
+         if _args.fold_list else list(range(_args.folds)))
 KV_DIR = "./transfer_learning_module/gpt_FTTs_GPT-last_layer_KV_weights"
-RESULTS_ROOT = "./transfer_learning_results/optuna_ckpt_results"
+
+# Model-selection metric for Stage 1 (tuning), scored on the held-out val split.
+# Default 'val_loss' is lower-is-better and relies on the direction-aware comparison
+# in trainer.train(). Set LATTLE_SELECT_METRIC=auc to select on val AUC instead.
+# Reported test metrics (AUC/ACC/F1) are computed the same way either way.
+SELECT_METRIC = os.environ.get('LATTLE_SELECT_METRIC', 'val_loss')
+SELECT_LESS_IS_BETTER = (SELECT_METRIC == 'val_loss')
+# Fixed epoch budget for Stage 1 (paper Sec 4.1 = 150). Overridable only so the
+# plumbing can be smoke-tested cheaply; production runs must leave it at 150.
+MAX_EPOCH = int(os.environ.get('LATTLE_MAX_EPOCH', '150'))
+RESULTS_ROOT = f"{WORK}/optuna_ckpt_results"
 
 
 
@@ -106,7 +135,11 @@ def objective(trial, source, target, num_class_target, fold):
 
     model = lattle.build_classifier(
         cat_cols, num_cols, bin_cols,
-        num_class=num_class_target, p=1
+        num_class=num_class_target, p=1,
+        num_layer=5, ffn_dim=2048, num_attention_head=8, hidden_dim=768,
+        hidden_dropout_prob=hidden_dropout_prob,   # must be set at BUILD time:
+        # lattle.train() receives an already-constructed model, so passing
+        # dropout only to train() leaves every nn.Dropout at p=0.
     )
 
     # Apply pre-trained CA weights if available
@@ -118,14 +151,16 @@ def objective(trial, source, target, num_class_target, fold):
         print('could not find the pretrain-weight')
         exit()
 
-    # Train on validation set for hyperparameter evaluation
-    lattle.train(
+    # Stage 1 (tuning): train on TRAIN only, select on the held-out VAL split.
+    # No checkpoint is written (save_best=False); train() returns the best score
+    # and the epoch it occurred at, so scoring a trial at its peak costs no I/O.
+    res = lattle.train(
         model,
         (X_train, y_train), (X_val, y_val),
-        num_epoch=1,
-        eval_metric='auc',
-        eval_less_is_better=False,
-        output_dir='./transfer_learning_results/trials',
+        num_epoch=MAX_EPOCH,   # paper Sec 4.1; no early stopping by design
+        eval_metric=SELECT_METRIC,
+        eval_less_is_better=SELECT_LESS_IS_BETTER,
+        output_dir=f'{WORK}/trials',
         batch_size=batch_size,
         lr=lr,
         weight_decay=weight_decay,
@@ -136,16 +171,13 @@ def objective(trial, source, target, num_class_target, fold):
         warmup_ratio=warmup_ratio,
     )
 
-    # Predict and return AUC
-    y_pred = lattle.predict(model, X_val, y_val)
-    if num_class_target == 2:
-        y_score = y_pred[:, 1] if y_pred.ndim == 2 else y_pred
-        return roc_auc_score(y_val, y_score)
-    else:
-        return roc_auc_score(y_val, y_pred, multi_class="ovr", average="macro")
+    # Record the epoch budget for Stage 2; Optuna only ranks on the score.
+    trial.set_user_attr('best_epoch', int(res['best_epoch']))
+    trial.set_user_attr('select_metric', SELECT_METRIC)
+    return float(res['best_eval_res'])
 
 
-def evaluate_final(source, target, num_class_target, best_params, fold):
+def evaluate_final(source, target, num_class_target, best_params, fold, best_epoch):
     # 1) fix the seed
     set_seed(fold)
 
@@ -170,7 +202,10 @@ def evaluate_final(source, target, num_class_target, best_params, fold):
 
     # 5) rebuild your model and (optionally) apply CA weights
     model = lattle.build_classifier(cat_cols, num_cols, bin_cols,
-                                      num_class=num_class_target, p=1)
+                                      num_class=num_class_target, p=1,
+                                      num_layer=5, ffn_dim=2048,
+                                      num_attention_head=8, hidden_dim=768,
+                                      hidden_dropout_prob=best_params['hidden_dropout_prob'])
     k_path = os.path.join(KV_DIR, f"{source}_{fold}/K_final.pt")
     v_path = os.path.join(KV_DIR, f"{source}_{fold}/V_final.pt")
     if os.path.exists(k_path) and os.path.exists(v_path):
@@ -178,22 +213,25 @@ def evaluate_final(source, target, num_class_target, best_params, fold):
     else:
         print('could not find the pretrain-weight')
         exit()
-    # 6) train on the combined set, validate on test set
+    # 6) Stage 2 (refit): train on train+val for exactly the epoch budget learned
+    # in Stage 1. No checkpoint selection here — val is now inside the training
+    # data, so selecting on it would be in-sample. No validation set is passed,
+    # so nothing but the test predict below ever sees held-out data.
     lattle.train(
         model,
         (X_train_val, y_train_val),
-        (X_te_df,   y_te_s),
-        num_epoch=1,
-        eval_metric='auc',
-        eval_less_is_better=False,
-        output_dir='./transfer_learning_results',
+        None,
+        num_epoch=max(1, int(best_epoch) + 1),   # best_epoch is 0-indexed
+        eval_metric=SELECT_METRIC,
+        eval_less_is_better=SELECT_LESS_IS_BETTER,
+        output_dir=WORK,
         seed=fold,
         batch_size=best_params['batch_size'],
         lr=best_params['lr'],
         weight_decay=best_params['weight_decay'],
         hidden_dropout_prob=best_params['hidden_dropout_prob'],
         num_class=num_class_target,
-        save_best=True,
+        save_best=False,
         exp=f'{source}_{target}_final_fold_{fold}',
         warmup_ratio=best_params['warmup_ratio'],
     )
@@ -217,6 +255,8 @@ def evaluate_final(source, target, num_class_target, best_params, fold):
 
 
 if __name__ == '__main__':
+    if _args.pair_index is not None:
+        dataset_pairs = [dataset_pairs[_args.pair_index]]
     for source, target in dataset_pairs:
         print(f"\n🔁 Running for: {source} → {target}")
         num_class_target = num_class_target_map[target]
@@ -234,7 +274,7 @@ if __name__ == '__main__':
             study_name = f"{source}_{target}_fold_{fold}"
             
             # Create full directory
-            optuna_dir = "./transfer_learning_results/optuna_studies"
+            optuna_dir = f"{WORK}/optuna_studies"
             os.makedirs(optuna_dir, exist_ok=True)
             
             # Save DB in that location
@@ -242,22 +282,23 @@ if __name__ == '__main__':
 
             study = optuna.create_study(
                 study_name=study_name,
-                direction='maximize',
+                direction='minimize' if SELECT_LESS_IS_BETTER else 'maximize',
                 storage=storage_path,
                 load_if_exists=True  # allows continuing from past runs
             )
 
             study.optimize(
                 lambda tr: objective(tr, source, target, num_class_target, fold),
-                n_trials=1
+                n_trials=_args.trials
             )
 
             best_trial = study.best_trial
             best_params = best_trial.params
-            all_best_params[f'fold_{fold}'] = best_params
+            best_epoch = best_trial.user_attrs['best_epoch']
+            all_best_params[f'fold_{fold}'] = dict(best_params, best_epoch=best_epoch)
+            print(f"   best {SELECT_METRIC}={best_trial.value:.6f} at epoch {best_epoch}")
 
-            # result = evaluate_fold(source, target, num_class_target, best_params, fold)
-            result = evaluate_final(source, target, num_class_target, best_params, fold)
+            result = evaluate_final(source, target, num_class_target, best_params, fold, best_epoch)
             all_fold_results[f'fold_{fold}'] = result
             auc_list.append(result['auc'])
             acc_list.append(result['acc'])
@@ -281,7 +322,12 @@ if __name__ == '__main__':
 
         output_dir = os.path.join(RESULTS_ROOT, f"{source}_{target}")
         os.makedirs(output_dir, exist_ok=True)
-        file_path = os.path.join(output_dir, f"evaluation_summary_{source}_{target}_results.json")
+        # Include the folds in the filename: parallel workers invoke this script
+        # once per fold, and a fixed name would make each invocation overwrite
+        # the previous fold's summary for the same pair.
+        fold_tag = "_folds" + "-".join(str(f) for f in folds)
+        file_path = os.path.join(
+            output_dir, f"evaluation_summary_{source}_{target}{fold_tag}_results.json")
         with open(file_path, 'w') as fp:
             json.dump(summary, fp, indent=2)
 

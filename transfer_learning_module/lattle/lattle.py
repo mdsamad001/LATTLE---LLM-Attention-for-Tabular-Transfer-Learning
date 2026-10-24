@@ -18,10 +18,10 @@ def build_classifier(
     feature_extractor=None,
     num_class=2,
     hidden_dim=768, #default 128
-    num_layer=2,
+    num_layer=5,        # paper Alg 1: gFTT layers {l0..l4}
     num_attention_head=8,
     hidden_dropout_prob=0,
-    ffn_dim=256,
+    ffn_dim=2048,       # paper Sec 3.3: FFN hidden dimension 2048
     activation='relu',
     device='cuda:0',
     p=None,
@@ -492,4 +492,6 @@ def train(model,
         valset,
         **train_args,
     )
-    trainer.train()
+    # Returns {'best_eval_res', 'best_epoch', ...} so the caller can score an
+    # Optuna trial at its best epoch without writing any checkpoint.
+    return trainer.train()

@@ -1,71 +1,44 @@
 import torch
 import os
 import glob
-from transformers import GPT2Tokenizer
-from LLM_finetune_module.models import DistilGPT2WithFTTHead
-from transformers import GPT2ForSequenceClassification
+from transformers import GPT2Model
 
 
-def load_custom_model(checkpoint_path, tokenizer, num_labels=2):
-    # This loads the pretrained weights automatically
-    base_model = GPT2ForSequenceClassification.from_pretrained(checkpoint_path)
-
-    # Wrap with your custom FTT head
-    custom_model = DistilGPT2WithFTTHead(
-        base_model=base_model,
-        num_class=num_labels,
-        hidden_dim=768,
-        ftt_dim=128,
-        num_heads=8,
-        dropout=0.1
-    )
-    return custom_model
-
-def extract_final_distilgpt2_kv_weights(model):
+def extract_final_gpt2_kv_weights(gpt2_model):
     """
-    Extracts Key and Value projection weights from the final transformer block of the DistilGPT2 base model.
+    Extracts Key and Value projection weights from the final transformer block
+    of a (fine-tuned) GPT2 model.
+
+    GPT2's fused c_attn is a Conv1D with weight shape [hidden_dim, 3*hidden_dim]
+    (computed as x @ W). Transposing gives the standard nn.Linear layout
+    [3*hidden_dim, hidden_dim]; rows [d:2d] are K and rows [2d:] are V.
     """
-    final_block = model.base.h[-1]  # DistilGPT2 transformer blocks are in model.base.h
+    final_block = gpt2_model.h[-1]
     attention = final_block.attn
 
-    # Transpose so shape becomes [3 * hidden_dim, hidden_dim]
-    c_attn_weight = attention.c_attn.weight.detach().cpu().T  # Transpose!
+    c_attn_weight = attention.c_attn.weight.detach().cpu().T  # [3*hidden, hidden]
 
     hidden_dim = c_attn_weight.shape[0] // 3
-    W_K = c_attn_weight[hidden_dim:2*hidden_dim, :]
-    W_V = c_attn_weight[2*hidden_dim:, :]
+    W_K = c_attn_weight[hidden_dim:2*hidden_dim, :].clone()
+    W_V = c_attn_weight[2*hidden_dim:, :].clone()
     return W_K, W_V
-
-
-
-def extract_cls_embedding(model, tokenizer):
-    model.eval()
-    dummy_input = tokenizer("This is a placeholder input.", return_tensors="pt", padding=True, truncation=True)
-    dummy_input = {k: v.to(next(model.parameters()).device) for k, v in dummy_input.items()}
-
-    with torch.no_grad():
-        outputs = model.base(**dummy_input)
-        cls_embedding = outputs.last_hidden_state[:, 0, :].squeeze(0).cpu()  # (hidden_dim,)
-    return cls_embedding
 
 
 # ---------------- Main script ---------------- #
 if __name__ == "__main__":
     dataset_list = [
-        # 'sick',
-        # 'seismic_bumps',
-        # 'mfeat-fourier',
         'credit-g',
-        # 'car',
-        # 'steel-plate-fault',
-        # 'churn',
-        # 'Cardiovascular-Disease-dataset',
-        # 'optdigits',
+        'car',
+        'sick',
+        'optdigits',
+        'mfeat-fourier',
+        'churn',
+        'steel-plate-fault',
+        'seismic_bumps',
+        'Cardiovascular-Disease-dataset',
     ]
-    tokenizer = GPT2Tokenizer.from_pretrained("distilgpt2")
-    tokenizer.pad_token = tokenizer.eos_token
 
-    seeds = list(range(10))
+    seeds = list(range(3))
     base_save_path = "./transfer_learning_module/gpt_FTTs_GPT-last_layer_KV_weights"
 
     for dataset_name in dataset_list:
@@ -78,19 +51,22 @@ if __name__ == "__main__":
                 continue
 
             checkpoint_path = checkpoint_paths[-1]
-            print(f"  Found checkpoint: {checkpoint_path}")
+            base_path = os.path.join(checkpoint_path, "base")
+            if not os.path.exists(os.path.join(base_path, "config.json")):
+                print(f"  ❌ No saved base model at {base_path} — re-run fine-tuning "
+                      f"(Finetune-LLM.py now saves the GPT2 transformer via save_pretrained).")
+                continue
+            print(f"  Found checkpoint: {base_path}")
 
-            model = load_custom_model(checkpoint_path, tokenizer)
+            gpt2_model = GPT2Model.from_pretrained(base_path)
 
-            # Extract weights from final DistilGPT2 layer
-            K_final, V_final = extract_final_distilgpt2_kv_weights(model)
-            CLS_embedding = extract_cls_embedding(model, tokenizer)
+            # Extract weights from final GPT2 layer
+            K_final, V_final = extract_final_gpt2_kv_weights(gpt2_model)
 
             # Save
             save_dir = os.path.join(base_save_path, f"{dataset_name}_{seed}")
             os.makedirs(save_dir, exist_ok=True)
-            torch.save(K_final, os.path.join(save_dir, f"K_final.pt"))
-            torch.save(V_final, os.path.join(save_dir, f"V_final.pt"))
-            torch.save(CLS_embedding, os.path.join(save_dir, f"CLS_final.pt"))
+            torch.save(K_final, os.path.join(save_dir, "K_final.pt"))
+            torch.save(V_final, os.path.join(save_dir, "V_final.pt"))
 
-            print(f"  Saved K, V, CLS to → {save_dir}")
+            print(f"  Saved K, V to → {save_dir}")

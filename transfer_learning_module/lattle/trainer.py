@@ -1,5 +1,6 @@
 import os
 import pdb
+import csv
 import math
 import time
 import json
@@ -20,7 +21,7 @@ from .trainer_utils import SupervisedTrainCollator, TrainDataset
 from .trainer_utils import get_parameter_names
 from .trainer_utils import get_scheduler
 from .modeling_lattle import TransTabTransformerLayer
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, accuracy_score, f1_score
 
 class Trainer:
     def __init__(self,
@@ -82,6 +83,9 @@ class Trainer:
         self.test_set_list = test_set_list
         self.output_dir = output_dir
         self.early_stopping = EarlyStopping(output_dir=output_dir, patience=patience, verbose=False, less_is_better=eval_less_is_better)
+        # Needed by train(): the checkpoint comparison below is direction-aware.
+        # Without this, a lower-is-better metric (val_loss) would select the worst epoch.
+        self.eval_less_is_better = eval_less_is_better
         self.args = {
             'lr':lr,
             'weight_decay':weight_decay,
@@ -122,12 +126,20 @@ class Trainer:
         test_losses = []
         epochs = []
         
-        val_aucs = []
-        
-        best_eval_res = float('-inf')  # Initialize with worst possible performance
+        val_aucs = []        # the selection metric, whatever it is set to
+        val_auc_curve = []   # val AUC, always, for post-hoc comparison
+        val_acc_curve = []   # threshold-dependent, unlike AUC
+        val_f1_curve = []
+
+        best_eval_res = float('inf') if self.eval_less_is_better else float('-inf')
+        best_epoch = -1
         best_model_path = os.path.join(self.output_dir, f"{self.exp}_best_model.pth")  # Path to save best model
 
         for epoch in trange(args['num_epoch'], desc='Epoch'):
+            # evaluate() below switches the model to eval mode; without this
+            # the model stays in eval mode for every epoch after the first,
+            # silently disabling dropout for the rest of training.
+            self.model.train()
             ite = 0
             train_loss = 0
 
@@ -162,10 +174,15 @@ class Trainer:
                 eval_res = np.mean(eval_res_list)
                 #test_losses.append(eval_res)
                 val_aucs.append(eval_res)
+                val_auc_curve.append(getattr(self, '_last_val_auc', None))
+                val_acc_curve.append(getattr(self, '_last_val_acc', None))
+                val_f1_curve.append(getattr(self, '_last_val_f1', None))
 
                 # Save the best model if the evaluation metric improves
-                if eval_res > best_eval_res:
+                improved = (eval_res < best_eval_res) if self.eval_less_is_better else (eval_res > best_eval_res)
+                if improved:
                     best_eval_res = eval_res
+                    best_epoch = epoch
                     if self.save_best:
                         torch.save(self.model.state_dict(), best_model_path)
                         if epoch%10==0:
@@ -242,8 +259,34 @@ class Trainer:
         #     self.save_model(self.output_dir)
             
         
-        self.plot_losses(train_losses, test_losses, epochs, plot_save_dir=self.output_dir) 
+        self.plot_losses(train_losses, test_losses, epochs, plot_save_dir=self.output_dir)
         logger.info('training complete, cost {:.1f} secs.'.format(time.time()-start_time))
+
+        # Persist the full selection curve so the chosen epoch is auditable rather than inferred.
+        try:
+            curve_dir = os.path.join(self.output_dir, 'curves')
+            os.makedirs(curve_dir, exist_ok=True)
+            with open(os.path.join(curve_dir, f'{self.exp}_curve.csv'), 'w', newline='') as fh:
+                w = csv.writer(fh)
+                w.writerow(['epoch', 'train_loss', 'val_loss', 'val_metric', 'val_auc', 'val_acc', 'val_f1'])
+                for i in range(len(epochs)):
+                    w.writerow([
+                        epochs[i],
+                        train_losses[i] if i < len(train_losses) else '',
+                        test_losses[i] if i < len(test_losses) else '',
+                        val_aucs[i] if i < len(val_aucs) else '',
+                        val_auc_curve[i] if i < len(val_auc_curve) else '',
+                        val_acc_curve[i] if i < len(val_acc_curve) else '',
+                        val_f1_curve[i] if i < len(val_f1_curve) else '',
+                    ])
+        except Exception as e:  # logging must never abort a training run
+            logger.warning(f'could not write selection curve: {e}')
+
+        # Returned so callers can score a trial at its best epoch without saving
+        # any checkpoint, and reuse that epoch count as a fixed budget later.
+        return {'best_eval_res': best_eval_res, 'best_epoch': best_epoch,
+                'eval_metric_name': self.args['eval_metric_name'],
+                'val_metric_curve': val_aucs, 'val_loss_curve': test_losses}
         
     def plot_losses(self, train_losses, test_losses, epochs, plot_save_dir='./transfer_learning_results'):
         os.makedirs(plot_save_dir, exist_ok=True)
@@ -317,6 +360,28 @@ class Trainer:
                 pred_all = np.concatenate(pred_list, 0)
                 if logits.shape[-1] == 1:
                     pred_all = pred_all.flatten()
+
+            # Always record val AUC alongside the selection metric, reusing the
+            # predictions just computed (no extra forward pass), so the loss-optimal
+            # and AUC-optimal epochs can be compared without a second run.
+            self._last_val_auc = None
+            self._last_val_acc = None
+            self._last_val_f1 = None
+            if len(y_test) > 0 and len(pred_list) > 0:
+                try:
+                    _y = np.concatenate(y_test, 0)
+                    if num_class == 2:
+                        _score = pred_all[:, 1] if getattr(pred_all, 'ndim', 1) == 2 else pred_all
+                        self._last_val_auc = float(roc_auc_score(_y, _score))
+                        _cls = (_score > 0.5).astype(int)
+                        self._last_val_f1 = float(f1_score(_y, _cls, average='binary', zero_division=0))
+                    else:
+                        self._last_val_auc = float(roc_auc_score(_y, pred_all, multi_class="ovr", average="macro"))
+                        _cls = np.argmax(pred_all, axis=1)
+                        self._last_val_f1 = float(f1_score(_y, _cls, average='macro', zero_division=0))
+                    self._last_val_acc = float(accuracy_score(_y, _cls))
+                except Exception:
+                    pass
 
             if self.args['eval_metric_name'] == 'val_loss':
                 eval_res = np.mean(loss_list)
@@ -447,13 +512,20 @@ class Trainer:
         if self.optimizer is None:
             decay_parameters = get_parameter_names(self.model, [nn.LayerNorm])
             decay_parameters = [name for name in decay_parameters if "bias" not in name]
+            # Params carrying transplanted K/V (frozen via gradient hook) must
+            # get zero weight decay: Adam adds wd*p to the gradient inside
+            # step(), after the hook, so any decay would still update the
+            # "frozen" K/V rows.
+            frozen_kv_ids = {id(p) for p in getattr(self.model, 'frozen_kv_params', [])}
             optimizer_grouped_parameters = [
                 {
-                    "params": [p for n, p in self.model.named_parameters() if n in decay_parameters],
+                    "params": [p for n, p in self.model.named_parameters()
+                               if n in decay_parameters and id(p) not in frozen_kv_ids],
                     "weight_decay": self.args['weight_decay'],
                 },
                 {
-                    "params": [p for n, p in self.model.named_parameters() if n not in decay_parameters],
+                    "params": [p for n, p in self.model.named_parameters()
+                               if n not in decay_parameters or id(p) in frozen_kv_ids],
                     "weight_decay": 0.0,
                 },
             ]

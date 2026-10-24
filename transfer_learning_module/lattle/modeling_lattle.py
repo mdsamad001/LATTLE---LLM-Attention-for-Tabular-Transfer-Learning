@@ -922,114 +922,82 @@ class TransTabModel(nn.Module):
         return None
 
     def freeze_kv_hook(self, grad):
-        d_model = grad.clone().shape[0] // 3
-
-        # Print gradient statistics before zeroing out
-        #print(f"Before Hook - Q Grad Norm: {grad[:d_model, :].norm().item()}")
-        #print(f"Before Hook - K Grad Norm: {grad[d_model:2*d_model, :].norm().item()}")
-        #print(f"Before Hook - V Grad Norm: {grad[2*d_model:, :].norm().item()}")
-
-        # Zero out K and V gradients
-        grad[d_model:2*d_model, :] = 0  # Freeze K
-        grad[2*d_model:, :] = 0  # Freeze V
-
-        # Print gradient statistics after zeroing out
-        #print(f"After Hook - Q Grad Norm: {grad[:d_model, :].norm().item()}")
-        #print(f"After Hook - K Grad Norm: {grad[d_model:2*d_model, :].norm().item()}")  
-        #print(f"After Hook - V Grad Norm: {grad[2*d_model:, :].norm().item()}")
-
-        return grad
+        # Per the PyTorch hook contract, return a modified clone instead of
+        # mutating the incoming gradient in place.
+        d_model = grad.shape[0] // 3
+        new_grad = grad.clone()
+        new_grad[d_model:2*d_model, :] = 0  # Freeze K
+        new_grad[2*d_model:, :] = 0  # Freeze V
+        return new_grad
     
-    def apply_ca(self, k_weight, v_weight, model = 'distilgpt', layer_indices = [0]):
-        inital_layer = 0
-        last_layer = len(self.encoder.transformer_encoder[1].layers)-1
-        final_attn_layer = self.encoder.transformer_encoder[1].layers[last_layer].self_attn  
+    def gftt_attention_layers(self):
+        """gFTT attention layers as a flat list, lowest (l0) first.
 
-        # Extract the full projection weight matrix
-        # qkv_weight = final_attn_layer.in_proj_weight  # Shape: (3*d_model, d_model)
-
-        # # Get the embedding dimension
-        d_model = final_attn_layer.embed_dim  # Typically 128 in your case
-        
-        # # Assume 'qkv_weight' is a pre-trained QKV stack from somewhere
-        # # 'd_model' is typically 128 in your config
-        # pretrained_k_weight = qkv_weight[d_model : 2*d_model, :].detach().clone()  # Pretrained K
-        # pretrained_v_weight = qkv_weight[2*d_model :, :].detach().clone()         # Pretrained V
-        
-        #self.encoder.transformer_encoder[1].layers[0].self_attn.num_attention_head = max(1, self.encoder.transformer_encoder[1].layers[1].self_attn.num_attention_head // 2)
-        #self.encoder.transformer_encoder[1].embed_dim = self.encoder.transformer_encoder[1].embed_dim // 2
-        
-        with torch.no_grad():
-            
-            # attn_layer_0 = self.encoder.transformer_encoder[0].self_attn  
-            # qkv_weight_0 = attn_layer_0.in_proj_weight  
-            # q_weight_0 = qkv_weight_0[:d_model, :].detach().clone() 
-
-            # print(f"Layer 0: Q shape: {q_weight_0.shape}, "
-            #       f"K shape: {pretrained_k_weight.shape}, "
-            #       f"V shape: {pretrained_v_weight.shape}")
-
-            # new_qkv_weight_0 = torch.cat([q_weight_0, pretrained_k_weight, pretrained_v_weight], dim=0)
-            # attn_layer_0.in_proj_weight.data = new_qkv_weight_0.clone()
-
-            # # Allow Q portion to be trained, but freeze K, V via gradient hook
-            # attn_layer_0.in_proj_weight.requires_grad_(True)
-            # attn_layer_0.in_proj_weight.register_hook(self.freeze_kv_hook)
-           
-
-            # Define the layers you want to modify
-            layer_indices = layer_indices  # Add more indices as needed
-            
-            if hasattr(self.encoder.transformer_encoder[1], "layers") and len(self.encoder.transformer_encoder[1].layers) > 0:
-                
-                '''# Define projections (no change in layer definitions)
-                row_projection = nn.Linear(768, 128, bias=False).to('cuda:0')  # Projects ROWS (after transpose)
-                col_projection = nn.Linear(768, 128, bias=False).to('cuda:0')  # Projects COLUMNS
-    
-                # Ensure weights are on CUDA
-                k_weight = k_weight.to('cuda:0')
-                v_weight = v_weight.to('cuda:0')
-    
-                # Step 1: Project ROWS (768 → 128)
-                # Transpose to treat rows as columns, apply row_projection, then transpose back
-                projected_k_weight = row_projection(k_weight.t()).t()  # Shape: [128, 768]
-                projected_v_weight = row_projection(v_weight.t()).t()  # Shape: [128, 768]
-    
-                # Step 2: Project COLUMNS (768 → 128)
-                pretrained_k_weight = col_projection(projected_k_weight)  # Shape: [128, 128]
-                pretrained_v_weight = col_projection(projected_v_weight)  # Shape: [128, 128]'''
-
-
-                #The following code is for using 768*768 on attention
-                pretrained_k_weight = k_weight.to('cuda:0')
-                pretrained_v_weight = v_weight.to('cuda:0')
-                
-                for i in layer_indices:
-                    if i >= len(self.encoder.transformer_encoder[1].layers):
-                        print(f"Warning: Layer index {i} exceeds available layers.")
-                        continue
-            
-                    attn_layer = self.encoder.transformer_encoder[1].layers[i].self_attn  
-                    qkv_weight = attn_layer.in_proj_weight  
-                    q_weight = qkv_weight[:d_model, :].detach().clone()  
-                    # v_weight = qkv_weight[2*d_model:, :].detach().clone()
-            
-                    print(f"Layer {i+1}: Q shape: {q_weight.shape}, "
-                          f"K shape: {pretrained_k_weight.shape}, "
-                          f"V shape: {pretrained_v_weight.shape}")
-                    # exit()
-                    new_qkv_weight = torch.cat([q_weight, pretrained_k_weight, pretrained_v_weight], dim=0)
-                    # print('q_weight: ',q_weight[0])
-                    # print('pretrained_k_weight: ',pretrained_k_weight[0])
-                    # print('pretrained_v_weight: ',pretrained_v_weight[0])
-                    attn_layer.in_proj_weight.data = new_qkv_weight.clone()
-            
-                    # Make sure Q can learn, K and V are frozen
-                    attn_layer.in_proj_weight.requires_grad_(True)
-                    attn_layer.in_proj_weight.register_hook(self.freeze_kv_hook)
-            
+        The encoder is built as [single_layer, nn.TransformerEncoder(num_layer-1)]
+        (see TransTabEncoder.__init__), so the paper's l0..l4 indexing maps onto
+        the concatenation of the two. Indexing transformer_encoder[1].layers[0]
+        directly would target l1, not l0.
+        """
+        layers = []
+        for mod in self.encoder.transformer_encoder:
+            if hasattr(mod, "layers"):
+                layers.extend(list(mod.layers))
             else:
-                print("Warning: model.encoder.transformer_encoder[1] does not have `layers`. Skipping.")
+                layers.append(mod)
+        return layers
+
+    def apply_ca(self, k_weight, v_weight, model='distilgpt', layer_indices=[0]):
+        """Transplant frozen K/V from the LLM's top layer into gFTT layer(s).
+
+        Paper Alg. 1: gFTT[W_k, W_v]{l0} <- [W^L_k, W^L_v], frozen, with W_q at
+        that layer left trainable. layer_indices are indices into
+        gftt_attention_layers(), so 0 == l0 == the lowest attention layer.
+        """
+        layers = self.gftt_attention_layers()
+        if not layers:
+            print("Warning: no gFTT attention layers found. Skipping transplant.")
+            return
+
+        device = layers[0].self_attn.in_proj_weight.device
+        # Transplanted K/V are frozen via a gradient hook; the Trainer also has to
+        # exclude them from weight decay, since Adam adds wd*p inside step()
+        # after hooks run.
+        if not hasattr(self, 'frozen_kv_params'):
+            self.frozen_kv_params = []
+
+        with torch.no_grad():
+            pretrained_k_weight = k_weight.to(device)
+            pretrained_v_weight = v_weight.to(device)
+
+            for i in layer_indices:
+                if i >= len(layers):
+                    print(f"Warning: layer index {i} exceeds {len(layers)} gFTT layers.")
+                    continue
+
+                attn_layer = layers[i].self_attn
+                d_model = attn_layer.embed_dim
+                qkv_weight = attn_layer.in_proj_weight
+                q_weight = qkv_weight[:d_model, :].detach().clone()
+
+                if pretrained_k_weight.shape != q_weight.shape:
+                    raise ValueError(
+                        f"K/V shape {tuple(pretrained_k_weight.shape)} does not match "
+                        f"gFTT layer {i} attention shape {tuple(q_weight.shape)}. "
+                        f"gFTT hidden_dim must equal the LLM hidden size (768)."
+                    )
+
+                print(f"gFTT l{i}: Q {tuple(q_weight.shape)}, "
+                      f"K {tuple(pretrained_k_weight.shape)}, "
+                      f"V {tuple(pretrained_v_weight.shape)} (K,V frozen)")
+
+                new_qkv_weight = torch.cat(
+                    [q_weight, pretrained_k_weight, pretrained_v_weight], dim=0)
+                attn_layer.in_proj_weight.data = new_qkv_weight.clone()
+
+                # Q stays trainable; K and V are held fixed.
+                attn_layer.in_proj_weight.requires_grad_(True)
+                attn_layer.in_proj_weight.register_hook(self.freeze_kv_hook)
+                self.frozen_kv_params.append(attn_layer.in_proj_weight)
 
     def apply_ca_n(self, k_weights, v_weights, model='distilgpt', layer_indices=[0, 1]):
         last_layer = len(self.encoder.transformer_encoder[1].layers) - 1

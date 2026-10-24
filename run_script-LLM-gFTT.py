@@ -51,7 +51,7 @@ def get_results(model, dataset, seed, bs=16, pt=1, name=None, use_wandb= False):
     # print(r)
 
     # Initialize
-    auc_ensemble = f1_ensemble = runtime = None
+    auc_ensemble = f1_ensemble = acc = runtime = None
 
     # Parse result lines by key
     for line in r:
@@ -65,6 +65,11 @@ def get_results(model, dataset, seed, bs=16, pt=1, name=None, use_wandb= False):
                 f1_ensemble = float(line.strip().split(":")[1])
             except:
                 pass
+        elif line.strip().startswith("ACC:"):
+            try:
+                acc = float(line.strip().split(":")[1])
+            except:
+                pass
         elif line.strip().startswith("Time:"):
             try:
                 runtime = float(line.strip().split(":")[1])
@@ -72,10 +77,11 @@ def get_results(model, dataset, seed, bs=16, pt=1, name=None, use_wandb= False):
                 pass
 
     if auc_ensemble is None or f1_ensemble is None or runtime is None:
-        print("Failed to extract AUC, F1, or Time. Full output:")
+        print("Failed to extract AUC, F1, ACC, or Time. Full output:")
         print("".join(r))
         return [], None, None, None
 
+    print(f"Parsed test metrics — AUC: {auc_ensemble}, F1: {f1_ensemble}, ACC: {acc}, Time: {runtime:.1f}s")
     return [], auc_ensemble, f1_ensemble, runtime
 
 

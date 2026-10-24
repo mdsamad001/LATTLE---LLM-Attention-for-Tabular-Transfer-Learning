@@ -1,0 +1,15 @@
+# Validated versions. torch is installed separately with a CUDA index URL, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.6
+transformers>=5.14,<6
+datasets>=5.0
+accelerate>=1.14
+numpy>=2.0
+pandas>=2.0
+scikit-learn>=1.5
+optuna>=4.0
+openml>=0.14
+xgboost>=2.0
+matplotlib>=3.8
+loguru>=0.7
+tqdm>=4.66

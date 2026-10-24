@@ -12,7 +12,11 @@ import openml
 import pandas as pd
 import torch
 import torch.nn as nn
-import wandb
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import accuracy_score, roc_auc_score
@@ -20,6 +24,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from transformers import (
+    EarlyStoppingCallback,
     GPT2ForSequenceClassification,
     GPT2Tokenizer,
     Trainer,
@@ -73,10 +78,11 @@ args = parser.parse_args()
 
 report_to_value = "wandb" if args.use_wandb else "none"
 
-# Set the seed for reproducibility
-torch.manual_seed(42)
-np.random.seed(42)
-random.seed(42)
+# Set the seed for reproducibility (use args.seed everywhere so model init
+# and training randomness vary across seeds, not just the data split)
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+random.seed(args.seed)
 
 shot = args.shot
 seed = args.seed
@@ -237,15 +243,14 @@ for i, block in enumerate(model.base.h):
 
 train_token_lengths = train_df['serialized_text'].apply(lambda x: len(tokenizer.tokenize(x)))
 val_token_lengths = val_df['serialized_text'].apply(lambda x: len(tokenizer.tokenize(x)))
-test_token_lengths = test_df['serialized_text'].apply(lambda x: len(tokenizer.tokenize(x)))
 
-# Find the maximum token length in each dataset
+# Find the maximum token length using train/val only (test set must not
+# influence preprocessing)
 max_train_tokens = train_token_lengths.max()
 max_val_tokens = val_token_lengths.max()
-max_test_tokens = test_token_lengths.max()
 
 # Determine the overall maximum token length
-max_tokens = max(max_train_tokens, max_val_tokens, max_test_tokens)
+max_tokens = max(max_train_tokens, max_val_tokens)
 
 
 
@@ -257,28 +262,28 @@ if max_tokens > max_length_allowed:
     max_tokens = max_length_allowed
 
 
-# max_tokens = 1030
+max_tokens = int(max_tokens)
 train_encodings = tokenizer(
-    train_dataset['serialized_text'], 
-    padding=True, 
-    truncation=True, 
-    return_tensors='pt', 
+    train_df['serialized_text'].tolist(),
+    padding=True,
+    truncation=True,
+    return_tensors='pt',
     max_length=max_tokens
 )
 
 val_encodings = tokenizer(
-    val_dataset['serialized_text'], 
-    padding=True, 
-    truncation=True, 
-    return_tensors='pt', 
+    val_df['serialized_text'].tolist(),
+    padding=True,
+    truncation=True,
+    return_tensors='pt',
     max_length=max_tokens
 )
 
 test_encodings = tokenizer(
-    test_dataset['serialized_text'], 
-    padding=True, 
-    truncation=True, 
-    return_tensors='pt', 
+    test_df['serialized_text'].tolist(),
+    padding=True,
+    truncation=True,
+    return_tensors='pt',
     max_length=max_tokens
 )
 
@@ -312,31 +317,55 @@ train_dataset = TabularDataset(train_encodings, train_labels)
 val_dataset = TabularDataset(val_encodings, val_labels)
 test_dataset = TabularDataset(test_encodings, test_labels)
 
-training_args = TrainingArguments(
-    output_dir=f'./llm_finetuning_results/{args.name}_{args.prompt_template}_{args.dataset}_{args.seed}',              # output directory
-    run_name = model_name+'-'+args.name+'-'+dataset+'-'+str(seed),
+import inspect
+import math
+
+import transformers
+
+NUM_EPOCHS = 200   # paper Sec 4.1: source LLM fine-tuned for 200 epochs
+# transformers >=5.15 removed `warmup_ratio`; warmup_steps works on all versions
+_steps_per_epoch = max(1, math.ceil(len(train_dataset) / args.batch))
+_warmup_steps = int(0.1 * _steps_per_epoch * NUM_EPOCHS)
+
+_ta_kwargs = dict(
+    output_dir=f'./llm_finetuning_results/{args.name}_{args.prompt_template}_{args.dataset}_{args.seed}',
+    run_name=model_name + '-' + args.name + '-' + dataset + '-' + str(seed),
     eval_strategy="epoch",               # evaluate at the end of each epoch
-    logging_strategy="epoch", 
-    num_train_epochs=1,                # number of training epochs
-    per_device_train_batch_size=args.batch,  # batch size for training
-    per_device_eval_batch_size=args.batch,   # batch size for evaluation
-    # warmup_steps=500,                    # warmup steps for learning rate scheduler
-    warmup_ratio = 0.1,
-    weight_decay=0.01,                   # weight decay
-    logging_dir='./llm_finetuning_results/logs',                # log directory
-    logging_steps=10,                    # steps between logging
-    load_best_model_at_end=True,         # load best model at the end
-    save_strategy="epoch",               # save the model at the end of each epoch
-    save_total_limit=1,                  # limit to 1 checkpoint, so only the best model is kept
-    metric_for_best_model="eval_loss",   # metric to decide the best model based on evaluation loss
-    greater_is_better=False,              # lower evaluation loss is better
-    learning_rate=3e-4,  # Custom learning rate
+    logging_strategy="epoch",
+    num_train_epochs=NUM_EPOCHS,         # upper bound; early stopping picks the best epoch
+    per_device_train_batch_size=args.batch,
+    per_device_eval_batch_size=args.batch,
+    warmup_steps=_warmup_steps,          # == warmup_ratio 0.1, computed for portability
+    weight_decay=0.01,
+    logging_dir='./llm_finetuning_results/logs',   # dropped in transformers >=5.15
+    logging_steps=10,
+    load_best_model_at_end=True,
+    save_strategy="epoch",
+    save_total_limit=1,
+    metric_for_best_model="eval_auc",    # select on AUC, the reported metric
+    greater_is_better=True,
+    learning_rate=3e-4,
     lr_scheduler_type="cosine",
-    report_to = report_to_value
+    report_to=report_to_value,
 )
 
+# TrainingArguments drops/renames arguments between transformers releases.
+# Keep only what this installed version accepts, and say what was dropped.
+_ta_supported = set(inspect.signature(TrainingArguments.__init__).parameters)
+_dropped = sorted(set(_ta_kwargs) - _ta_supported)
+if _dropped:
+    print(f"[compat] transformers {transformers.__version__} does not accept "
+          f"{_dropped}; continuing without them.")
+    _ta_kwargs = {k: v for k, v in _ta_kwargs.items() if k in _ta_supported}
+
+training_args = TrainingArguments(**_ta_kwargs)
+
 if args.use_wandb:
-    wandb.login(key="178b7e540059aa728c6c6eac5055e2e827c1c364")
+    if wandb is None:
+        raise ImportError("wandb is not installed but --use_wandb was passed")
+    # Authenticate via `wandb login` or the WANDB_API_KEY env var — never
+    # hardcode API keys in source.
+    wandb.login()
     wandb.init(
         project="distilgpt2-tabular-classification-gftt-user",
         name=model_name + '-' + args.name + '-' + dataset + '-' + str(seed)
@@ -373,8 +402,11 @@ def compute_metrics(pred):
             else:
                 auc = roc_auc_score(labels, probs, multi_class='ovr', average='weighted')
     except ValueError as e:
+        # 0.0 rather than NaN: eval_auc drives checkpoint selection, and NaN
+        # comparisons are always False, which would freeze "best model" at the
+        # first epoch.
         print(f"AUC computation failed: {e}")
-        auc = float('nan')  # If AUC cannot be computed, return NaN
+        auc = 0.0
 
     return {
         "accuracy": accuracy,
@@ -391,10 +423,9 @@ trainer = Trainer(
     train_dataset=train_dataset,
     # evaluate on validation test. Using test set means we leaked information.
     eval_dataset=val_dataset,  
-    compute_metrics=compute_metrics, 
-    callbacks=[TrainingMetricsCallback()],
+    compute_metrics=compute_metrics,
+    callbacks=[TrainingMetricsCallback(), EarlyStoppingCallback(early_stopping_patience=10)],
 )
-# EarlyStoppingCallback(early_stopping_patience=20), 
 
 # Train the model
 train_output = trainer.train()
@@ -402,11 +433,13 @@ train_output = trainer.train()
 save_dir = f"./llm_finetuning_results/best_models/{args.name}_{args.prompt_template}_{args.dataset}_{args.seed}"
 os.makedirs(save_dir, exist_ok=True)  # ✅ Ensure directory exists
 
-# Save best model (guaranteed to be best if load_best_model_at_end=True)
-trainer.save_model(save_dir)
-
-# Also save raw state_dict just in case
-torch.save(trainer.model.state_dict(), os.path.join(save_dir, "pytorch_model.bin"))
+# Save the fine-tuned GPT2 transformer via save_pretrained (writes config.json
+# + weights with proper key names) so it can be reloaded with
+# GPT2Model.from_pretrained in save_KV_weights.py. The wrapper's full state
+# dict is saved separately (NOT as pytorch_model.bin, which would shadow the
+# HF weights at load time).
+trainer.model.base.save_pretrained(os.path.join(save_dir, "base"))
+torch.save(trainer.model.state_dict(), os.path.join(save_dir, "wrapper_state_dict.pt"))
 
 
 # os.makedirs('./llm_finetuning_results/plots', exist_ok=True)
@@ -551,7 +584,8 @@ log_data = {
 #     json.dump(log_data, f, indent=4)
 # predictions.predictions
 print(f'AUC: {result_auc}')
-print(f'F1: {result_accuracy}')
+print(f'F1: {result_f1}')
+print(f'ACC: {result_accuracy}')
 print(f'Time: {time}')
 
 
