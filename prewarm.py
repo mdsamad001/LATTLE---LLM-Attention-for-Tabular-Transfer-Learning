@@ -20,7 +20,7 @@ if not os.path.exists('./lattle_tokenizer/tokenizer'):
 
 from transfer_learning_module import lattle
 
-TARGETS = ["Diabetes", "vehicle", "cmc", "pc1", "cylinder-bands"]
+TARGETS = ["ilpd", "vehicle", "cmc", "pc1", "cylinder-bands"]
 FOLDS = int(os.environ.get("NFOLDS", "10"))
 os.makedirs("cached_datasets", exist_ok=True)
 

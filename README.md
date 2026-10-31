@@ -82,8 +82,8 @@ We use tabular datasets from OpenML (e.g., `credit-g`, `car`, `churn`, `sick`, e
 Below are example source-target dataset pairs used for transfer experiments:
 
 ```
-("credit-g", "Diabetes")
- ("Cardivascular-Disease", "Diabetes")
+("credit-g", "ilpd")
+ ("Cardivascular-Disease", "ilpd")
  ("optdigits", "vehicle")
  ("mfeat-fourier", "vehicle")
  ("sick", "cmc")

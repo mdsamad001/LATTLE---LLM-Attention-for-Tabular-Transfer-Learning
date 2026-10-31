@@ -71,8 +71,8 @@ SRC_HP = dict(lr=1e-4, batch_size=64, weight_decay=1e-5,
 # Source names match the Step-1/Step-2 dataset names so KV weights resolve
 # under KV_DIR/{source}_{fold}.
 dataset_pairs = [
-    ("credit-g", "Diabetes"),
-    ("Cardiovascular-Disease-dataset", "Diabetes"),
+    ("credit-g", "ilpd"),
+    ("Cardiovascular-Disease-dataset", "ilpd"),
     ("optdigits", "vehicle"),
     ("mfeat-fourier", "vehicle"),
     ("sick", "cmc"),
@@ -84,7 +84,7 @@ dataset_pairs = [
 ]
 
 num_class_target_map = {
-    "Diabetes": 2,
+    "ilpd": 2,
     "vehicle": 4,
     "cmc": 3,
     "pc1": 2,

@@ -2,7 +2,7 @@ import torch, warnings, pickle
 warnings.filterwarnings("ignore")
 from transfer_learning_module import lattle
 
-_,tr,va,te,cc,nc,bc = pickle.load(open("cached_datasets/Diabetes_seed0.pkl","rb"))
+_,tr,va,te,cc,nc,bc = pickle.load(open("cached_datasets/ilpd_seed0.pkl","rb"))
 m = lattle.build_classifier(cc,nc,bc,num_class=2,p=1,
                             num_layer=5, ffn_dim=2048, num_attention_head=8, hidden_dim=768)
 

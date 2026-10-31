@@ -22,7 +22,7 @@ STEP3_GLOB = "./transfer_learning_results*/optuna_ckpt_results"
 
 # index order must match dataset_pairs in run_script-LATTLE.py
 PAIR_NAMES = [
-    "credit-g_Diabetes", "Cardiovascular-Disease-dataset_Diabetes",
+    "credit-g_ilpd", "Cardiovascular-Disease-dataset_ilpd",
     "optdigits_vehicle", "mfeat-fourier_vehicle", "sick_cmc", "churn_cmc",
     "car_pc1", "steel-plate-fault_pc1",
     "steel-plate-fault_cylinder-bands", "seismic_bumps_cylinder-bands",
